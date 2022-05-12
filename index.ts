@@ -3,814 +3,906 @@
 // This software is released under the MIT License.
 // https://opensource.org/licenses/MIT
 
-import { omit, pick } from "./util/object";
-import { ExSet } from "./util/ex-set";
-import { BooleansColumn } from "./columns/booleans";
-import { BooleanConstraints, booleansUtil, BoolReducer } from "./columns/booleans/util";
-import { DatesColumn } from "./columns/dates";
-import { DateConstraints, datesUtil, DateToDateReducer } from "./columns/dates/util";
-import { NumbersColumn } from "./columns/numbers";
-import { NumberConstraints, NumbersReducer, numbersUtil } from "./columns/numbers/util";
-import { StringsColumn } from "./columns/strings";
-import { StringConstraints, stringsUtil, StrToNumReducer } from "./columns/strings/util";
-import { DataFrameError } from "./errors";
-import { ID } from './columns/util';
-import { dataFrameUtil, aggregationUtil} from './util';
-import { 
-  BooleansColumnDefinition, DataFrameAggregationPipe, DataFrameCast, 
-  DataFrameClean, DataFrameColumn, DataFrameFilter, 
-  DataFrameFilterOperators, DataFrameGroupBy, DataFrameMerge, 
-  DataFrameOmit, DataFrameReduce, DataFrameSelect, 
-  DataFrameSort, DataFrameTransform, DatesColumnDefinition, 
-  NumbersColumnDefinition, StringsColumnDefinition 
-} from "./types";
+import { BooleanSeries } from "./series/boolean";
+import { booleanUtil } from "./series/boolean/util";
+import { DateSeries } from "./series/date";
+import { dateUtil } from "./series/date/util";
+import { DatetimeSeries } from "./series/datetime";
+import { datetimeUtil } from "./series/datetime/util";
+import { NumberSeries } from "./series/number";
+import { NumberConstraints, NumberMatch, numberUtil } from "./series/number/util";
+import { Series } from "./series/series";
+import { StringSeries } from "./series/string";
+import { StringLengthReducer, stringUtil } from "./series/string/util";
+import { TimeSeries } from "./series/time";
+import { timeUtil } from "./series/time/util";
+import { CountReducer, generateKey, MergeType } from "./series/util";
+import { AggregationPipe, Column, ColumnConstraint, columnTypesList, DataFrameMatch, DataframeOptions, RowObject } from "./types";
+import { groupBy } from "./util";
+import { Range } from "./util/range";
+import { DFSet } from "./util/sets";
 
-export class DataFrame<T = any> {
-  protected _keys: ExSet<ID>;
-  protected _sortColumn: string;
+const defaultIndexColName = "_df_index";
 
-  constructor(public name: string, public _columns: DataFrameColumn[], private _keyColumn?: string) {
+export class Dataframe {
+  protected _name: string;
+  protected sortColumn: Series;
+  protected indexColumn: string;
+  protected columns: Series[] = [];
 
-    this.fillKeys();
-  }
+  constructor(public name: string, data: RowObject[], options?: DataframeOptions) {
 
+    if (data.length > 0) {
+      let names: string[] = options?.select ?? Object.keys(data[0]);
 
+      if (options?.columnTypes) {
 
-  // Protected Methods
-  // =======================================================================================================================================
-  protected newKey() {
-    const keys = Array.from(this.keys());
-    let key = this.size;
+        for (let i = 0; i < names.length; i++)
+          this.columns.push(Dataframe.CreateSeriesFromType(names[i], options.columnTypes[i], data.map(entry => entry[name])))
 
-    while (keys.includes(key))
-      key++;
+      } else {
 
-    return key;
-  }
+        for (const name of names) {
+          const values = data.map(entry => entry[name]);
+          this.columns.push(Dataframe.CreateSeriesFromType(name, Dataframe.GetTypeOfData(values), values));
+        }
+      }
 
-  protected unifiedKeys() {
-    const keys: ExSet<ID>[] = [];
-
-    for (const column of this._columns)
-      keys.push(new ExSet(column.keys()));
-
-    return ExSet.Union(...keys);
-  }
-
-  protected fillKeys() {
-    const keys = this.unifiedKeys();
-
-    for (const column of this._columns)
-      column.fillKeys(keys.values());
-  }
-
-
-
-  // Getters
-  // =======================================================================================================================================
-  get size() {
-    return Math.max(...this._columns.map(col => col.size)) || 0;
-  }
-
-
-
-  // Utility Methods
-  // =======================================================================================================================================
-  *[Symbol.iterator]() {
-    for (const key of this.keys())
-      yield this.record(key);
-  }
-
-  keys() {
-    const sortColumn = this.column(this._sortColumn) || this._columns[0];
-
-    return !!sortColumn
-      ? sortColumn.keys()
-      : [].values();
-  }
-
-  record(key: ID, namespaced = false) {
-    const rec: any = {};
-
-    for (const col of this._columns)
-      rec[namespaced ? `${this.name}_${col.name}` : col.name] = col.value(key);
-
-    return rec as T;
-  }
-
-  records(namespaced = false) {
-    const list: T[] = [];
-
-    for (const key of this.keys())
-      list.push(this.record(key, namespaced));
-
-    return list;
-  }
-
-  nullRecord(namespaced = false) {
-    const rec: any = {};
-
-    for (const name of this.columnsNames(namespaced))
-      rec[name] = null;
-
-    return rec;
-  }
-
-  addRecord(rec: T) {
-    if (!rec)
-      return;
-
-    const columnsAdded: DataFrameColumn[] = [];
-    const newKey: ID = this._keyColumn
-      ? rec.hasOwnProperty(this._keyColumn)
-        ? (rec as any)[this._keyColumn]
-        : this.newKey()
-      : this.newKey();
-
-
-    try {
-      for (const column of this._columns)
-        if (rec.hasOwnProperty(column.name))
-          (column as NumbersColumn).set(newKey, (rec as any)[column.name] ?? null);
-
-    } catch (error) {
-      for (const col of columnsAdded)
-        col.unset(newKey);
-
-      throw error;
+      this.setIndex(options?.index);
     }
 
-    return this;
+    if (!this.indexColumn) {
+      this.indexColumn = defaultIndexColName;
+      this.columns.unshift(new NumberSeries(defaultIndexColName, new Range(0, this.columns[0]?.size ?? 0).toArray()));
+    }
+
+    Dataframe.DFs.set(name, this);
   }
 
-  columnsNames(namespaced = false) {
-    return this._columns.map(col => namespaced ? `${this.name}_${col.name}` : col.name);
+
+
+  /**
+   * Getters
+   * -----------------------------------------------------------
+   */
+
+  get size() {
+    return this.columns[0]?.size;
   }
+
+  get info() {
+    return {};
+  }
+
+  get index() {
+    return this.columns.find(col => col.name === this.indexColumn) || null;
+  }
+
+
+
+  /**
+   * helper Methods
+   * -----------------------------------------------------------
+   */
+
+  protected keyOf(key: any) {
+    return (this.index as NumberSeries).keyOf(key);
+  }
+
+
+
+  /**
+   *  Iteratoors Methods
+   * -----------------------------------------------------------
+   */
+
+  *[Symbol.iterator]() {
+    const loopColumn = this.sortColumn || this.index;
+
+    if (!loopColumn)
+      return;
+
+    for (const key of loopColumn.keys()) {
+      const row: any = {};
+
+      for (const column of this.columns)
+        row[column.name] = column.value(key);
+
+      yield [this.index.value(key), row];
+    }
+  }
+
+  *entries() {
+    yield* this;
+  }
+
+  *keys() {
+    for (const [k, v] of this)
+      yield k;
+  }
+
+  *values() {
+    for (const [k, v] of this)
+      yield v;
+  }
+
+
+
+  /**
+   *  Columns Utility Methods
+   * -----------------------------------------------------------
+   */
 
   hasColumn(name: string) {
-    return !!this._columns.find(col => col.name === name);
+    return this.columns.some(col => col.name === name);
   }
 
   column(name: string) {
-    return this._columns.find(col => col.name === name);
+    return this.columns.find(col => col.name === name);
   }
 
-  columns(names: string[]) {
-    return new DataFrame(this.name, this._columns.filter(col => names.includes(col.name)), this._keyColumn);
+  columnsNames() {
+    return this.columns.map(col => col.name);
   }
 
-  addColumn(col: DataFrameColumn) {
-    this._columns.push(col.clone(this.hasColumn(col.name) ? col.name + '_' + this.newKey() : col.name));
+  addColumn(name: string, column: any[]): Dataframe
+  addColumn(series: Series): Dataframe
+  addColumn(column: string | Series, list?: any[]) {
 
-    this.fillKeys();
+    if (typeof column === 'string')
+      this.columns.push(Dataframe.CreateSeriesFromType(column, Dataframe.GetTypeOfData(list), list));
+    else
+      this.columns.push(column);
 
     return this;
   }
 
+  select(columns: string[]) {
+    const df = new Dataframe(this.name, []);
 
-  renameColumn(oldName: string, newName: string) {
-    const column = this.column(oldName);
+    df.columns = columns.map(name => this.column(name));
+    df.setIndex(this.indexColumn);
 
-    if (!column || this.hasColumn(newName))
-      return this;
-
-    column.name = newName;
-
-    return this;
+    return df;
   }
 
-  deleteColumns(columns: string[]) {
-    for (const name of columns) {
-      const index = this._columns.findIndex(col => col.name === name);
+  unselect(columns: string[]) {
+    const df = new Dataframe(this.name, []);
 
-      index > -1 && this._columns.splice(index, 1);
+    df.columns = this.columns.filter(column => !columns.includes(column.name));
+    df.setIndex(this.indexColumn);
+
+    return df;
+  }
+
+  omitColumns(names: string[]) {
+    for (const name of names) {
+      const index = this.columns.findIndex(column => column.name === name);
+
+      if (index > -1)
+        this.columns.splice(index, 1);
     }
 
     return this;
   }
 
-  hasColumnValue(columnName: string, value: any) {
-    const column = this.column(columnName) as NumbersColumn;
+  renameColumn(before: string, after: string) {
+    const column = this.column(before);
 
     if (column)
-      return column.hasValue(value);
+      column.name = after;
 
-    return null;
+    if (this.indexColumn === before)
+      this.indexColumn = after;
+
+    return this;
+  }
+
+  renameColumns(columns: { before: string, after: string }[]) {
+    for (const column of columns)
+      this.renameColumn(column.before, column.after);
+
+    return this;
+  }
+
+  setValidations(column: string, validations: ColumnConstraint) {
+    (this.column(column) as NumberSeries)?.setValidations(validations as NumberConstraints);
+
+    return this;
+  }
+
+  setViolations(column: string, violations: ColumnConstraint) {
+    (this.column(column) as NumberSeries)?.setViolations(violations as NumberConstraints);
   }
 
 
 
-  // Cleansing Methods
-  // =======================================================================================================================================
-  dateColumns(columnName: string, keepOriginal = false) {
+  /**
+   *  Index Utility Methods
+   * -----------------------------------------------------------
+   */
 
-    const column = this.column(columnName);
+  setIndex(columnName: string) {
+    const colIndex = this.columns.findIndex(col => col.name === columnName);
 
-    if (!column || column.type === 'boolean' || column.type === 'date')
+    if (colIndex > -1) {
+
+      if (this.indexColumn === defaultIndexColName)
+        this.columns.shift();
+
+      this.indexColumn = columnName;
+      this.columns.unshift(this.columns.splice(colIndex, 1)[0]);
+    }
+
+    return this;
+  }
+
+  resetIndex() {
+    if (this.indexColumn === defaultIndexColName)
       return this;
 
-    this._columns.push(column.toDates(keepOriginal ? column.name + '_date' : column.name));
+    this.indexColumn = defaultIndexColName;
+    this.columns.unshift(new NumberSeries(defaultIndexColName, new Range(0, this.columns[0]?.size ?? 0).toArray()));
+  }
 
-    if (!keepOriginal)
-      this.deleteColumns([column.name]);
+
+
+  /**
+   *  Filter Methods
+   * -----------------------------------------------------------
+   */
+
+  get(keys: number[] | IterableIterator<number> | Set<number> | DFSet<number>, name?: string) {
+    return new Dataframe(name || this.name, Array.from(keys).map(key => this.rowByIndex(key)));
+  }
+
+  slice(start: number, end = this.size, name?: string) {
+    const df = new Dataframe(name || this.name, []);
+
+    df.columns = this.columns.map(col => col.slice(start, end));
+    df.setIndex(this.indexColumn);
+
+    return df;
+  }
+
+  head(rows = 5) {
+    return this.slice(0, rows);
+  }
+
+  tail(rows = 5) {
+    return this.slice(-1 * rows);
+  }
+
+
+
+  /**
+   *  Copy Methods
+   * -----------------------------------------------------------
+   */
+
+  clone(name?: string) {
+    const df = new Dataframe(name || this.name, []);
+
+    df.columns = this.columns.map(col => col.clone());
+    df.setIndex(this.indexColumn);
+
+    return df;
+  }
+
+
+
+  /**
+   *  Sorting Methods
+   * -----------------------------------------------------------
+   */
+
+  sort(columns: string[] = [this.indexColumn], desc = false) {
+    const start = this.column(columns.shift());
+
+    if (!start)
+      return this;
+
+    this.sortColumn = start;
+
+    start.sort(desc, (k1: number, k2: number) => {
+      let i = 0;
+
+      while (i < columns.length) {
+        const column = this.column(columns[i++]);
+
+        if (!column)
+          continue;
+
+        const result = (column as BooleanSeries).compare(k1, k2, desc);
+
+        if (result !== 0)
+          return result;
+      }
+
+      return 0;
+    });
+  }
+
+
+
+  /**
+  * Helper I/O Methods
+  * -----------------------------------------------------------
+  */
+
+  protected rowByIndex(index: number) {
+    const row: any = {};
+
+    for (const column of this.columns)
+      row[column.name] = column.value(index);
+
+    return row;
+  }
+
+
+
+  /**
+  * I/O Methods
+  * -----------------------------------------------------------
+  */
+
+  row(key: any) {
+    return this.rowByIndex(this.keyOf(key));
+  }
+
+  rows(keys: any[] | IterableIterator<any>) {
+    return Array.from(keys).map(key => this.row(key));
+  }
+
+  addRow(row: RowObject) {
+    const key = !!this.index ? generateKey(Array.from(this.index.keys())) : 0;
+
+    for (const col of this.columns as NumberSeries[])
+      col.set(key, row[col.name] as number ?? null)
+
+    return this;
+  }
+
+  addRows(rows: RowObject[]) {
+    for (const row of rows)
+      this.addRow(row);
+
+    return this;
+  }
+
+  set(key: any, row: RowObject) {
+    const index = this.keyOf(key);
+
+    if (index > -1)
+      for (const columnName in row)
+        (this.column(columnName) as NumberSeries)?.set(index, row[columnName] as number);
+
+    return this;
+  }
+
+  unset(key: any) {
+    const index = this.keyOf(key);
+
+    if (index > -1)
+      for (const column of this.columns)
+        column.unset(index);
+
+    return this;
+  }
+
+  unsetAll(keys: any[] | IterableIterator<any>) {
+
+    for (const key of keys)
+      this.unset(key);
+
+    return this;
+  }
+
+
+
+  /**
+  * Cleaning Methods
+  * -----------------------------------------------------------
+  */
+
+  fillNulls(columns: { column: string, valueOrReducer: any }[]) {
+    for (const options of columns)
+      this.column(options.column)?.fillNulls(options.valueOrReducer);
 
     return this;
   }
 
   omitNulls() {
-    const keys: ExSet<ID>[] = [];
+    let indexes = new DFSet<number>();
 
-    for (const col of this._columns)
-      keys.push(new ExSet(col.nulls().keys()));
+    for (const column of this.columns)
+      indexes = indexes.or(column.eq(null));
 
-    const nullKeys = ExSet.Union(...keys);
-
-    this._columns = this._columns.map(col => col.getManyInv(nullKeys.values()));
-
-    return this;
-  }
-
-  fillNulls(columnName: string, valueOrAlias: any) {
-    const column = this.column(columnName);
-
-    if (!column)
-      return this;
-
-    (column as NumbersColumn).fillNulls(valueOrAlias);
-
-    return this;
-  }
-
-  setValidations(colName: string, constraints: BooleanConstraints | DateConstraints | NumberConstraints | StringConstraints) {
-    const column = this.column(colName);
-
-    if (!column)
-      return this;
-
-    column.validations = constraints;
-
-    return this;
-  }
-
-  setViolations(colName: string, constraints: BooleanConstraints | DateConstraints | NumberConstraints | StringConstraints) {
-    const column = this.column(colName);
-
-    if (!column)
-      return this;
-
-    column.violations = constraints;
+    for (const column of this.columns)
+      column.omit(indexes.values());
 
     return this;
   }
 
 
 
-  // Filters Methods
-  // =======================================================================================================================================
-  get(key: ID) {
-    return new DataFrame(this.name, this._columns.map(col => col.get(key)), this._keyColumn);
+  /**
+  * Filter Methods
+  * -----------------------------------------------------------
+  */
+
+  protected or(columns: DataFrameMatch[]) {
+    let keys = new DFSet<number>();
+
+    for (const options of columns)
+      keys = keys.or(this.match(options));
+
+    return keys;
   }
 
-  getMany(keys: ID[]) {
-    return new DataFrame(this.name, this._columns.map(col => col.getMany(keys)), this._keyColumn);
-  }
+  match(columns: DataFrameMatch) {
+    let keys = new DFSet<number>();
 
-  getByColumns(...columns: DataFrameColumn[]) {
-    const keysSets: ExSet<ID>[] = [];
-
-    for (const column of columns)
-      keysSets.push(new ExSet(column.keys()));
-
-    return this.getMany(ExSet.Intersection(...keysSets).toArray());
-  }
-
-  index(i: number) {
-    return this.get(Array.from(this.keys())[i]);
-  }
-
-  head(num = 5) {
-    return this.getMany(Array.from(this.keys()).slice(0, num));
-  }
-
-  tail(num = 5) {
-    return this.getMany(Array.from(this.keys()).slice(-num));
-  }
-
-  slice(start: number, end?: number) {
-    return this.getMany(Array.from(this.keys()).slice(start, end));
-  }
-
-
-
-  // Copy Methods
-  // =======================================================================================================================================
-  clone(name = this.name + '_clone') {
-    return new DataFrame(name, this._columns.map(col => col.clone()), this._keyColumn);
-  }
-
-
-
-  // Aggregation Method
-  // =======================================================================================================================================
-  aggregate(pipeline: DataFrameAggregationPipe[]) {
-    let df = this.clone(this.name);
-
-    for (const pipe of pipeline)
-      df = DataFrame.processSinglePipe(df, pipe);
-
-    return df;
-  }
-  
-
-
-  // Static Aggregation Methods
-  // =======================================================================================================================================
-  private static or(df: DataFrame, options: DataFrameFilterOperators[]) {
-    const idsGroups: ExSet<ID>[] = [];
-
-    for (const filter of options)
-      idsGroups.push(new ExSet(DataFrame.filter(df, { filter }).keys()));
-
-    return ExSet.Union(...idsGroups).toArray();
-  }
-
-  private static filter(df: DataFrame, options: DataFrameFilter) {
-    const idsGroups: ExSet<ID>[] = [];
-
-    for (const field in options.filter) {
-      if (field === 'or') {
-        idsGroups.push(new ExSet(DataFrame.or(df, options.filter.or)));
+    for (const column in columns) {
+      if (column === 'or') {
+        keys = keys.and(this.or(columns.or));
         continue;
       }
 
-      if (field === 'index') {
-        idsGroups.push(new ExSet(df.index(options.filter.index).keys()));
-        continue;
-      }
+      let series = this.column(column) as NumberSeries;
 
-      if (field === 'head') {
-        idsGroups.push(new ExSet(df.head(options.filter.head).keys()));
-        continue;
-      }
+      if (!series) continue;
 
-      if (field === 'tail') {
-        idsGroups.push(new ExSet(df.tail(options.filter.tail).keys()));
-        continue;
-      }
-
-      if (field === 'slice') {
-        idsGroups.push(new ExSet(df.slice(options.filter.slice[0], options.filter.slice[1]).keys()));
-        continue;
-      }
-
-      if (field[0] === '$') {
-        const col = df.column(field.slice(1));
-
-        if (!col)
-          throw new DataFrameError(`cannot filter by '${field.slice(1)}', column not exists`);
-
-        idsGroups.push(new ExSet(col.filter((options.filter as any)[field]).keys()));
-      }
+      keys = keys.and(series.match(columns[column as '$s'] as NumberMatch));
     }
 
-    return df.getMany(ExSet.Intersection(...idsGroups).toArray());
+    return keys;
   }
 
-  private static select(df: DataFrame, options: DataFrameSelect) {
-    const columns: string[] = [];
-    const renames: [string, string][] = [];
 
 
-    for (const entry of options.select)
-      if (typeof entry === 'string')
-        columns.push(entry);
-      else {
-        columns.push(entry.column);
-        if (entry.as)
-          renames.push([entry.column, entry.as]);
-      }
+  /**
+  * Transform Methods
+  * -----------------------------------------------------------
+  */
 
-    df.columns(columns);
+  transform(columns: { column: string, transformer: string, options?: any[], as?: string }[]) {
+    for (const column of columns) {
+      const series = this.column(column.column);
 
-    for (const tuple of renames)
-      df.renameColumn(...tuple);
+      if (!series || typeof series[column.transformer as 'count'] !== 'function') continue;
 
-    return df;
-  }
+      const newSeries = series[column.transformer as 'count'](...(column.options || []));
 
-  private static omit(df: DataFrame, options: DataFrameOmit) {
-    return df.deleteColumns(options.omit);
-  }
+      if (column.as)
+        newSeries.name = column.as;
+      else
+        this.omitColumns([series.name]);
 
-  private static sort(df: DataFrame, options: DataFrameSort) {
-    const column = df.column(options.sort.column);
-
-    if (!column)
-      return df;
-
-    column.sort(options.sort.desc);
-
-    return df;
-  }
-
-  private static clean(df: DataFrame, options: DataFrameClean) {
-
-    if (!!options.clean.fillNuls)
-      for (const entry of options.clean.fillNuls)
-        df.fillNulls(entry.column, entry.valueOrAlias);
-
-    if (options.clean.omitNulls)
-      df.omitNulls();
-
-    if (options.clean.setValidations)
-      for (const entry of options.clean.setValidations)
-        df.setValidations(entry.column, entry.constraints);
-
-    if (options.clean.setViolations)
-      for (const entry of options.clean.setViolations)
-        df.setViolations(entry.column, entry.constraints);
-
-    return df;
-  }
-
-  private static groupBy(df: DataFrame, options: DataFrameGroupBy) {
-    const groupColumn = df.column(options.groupBy.columnName);
-    const renderedColumns: DataFrameColumn[] = [];
-
-    if (!groupColumn)
-      throw new DataFrameError(`cannot groupby '${options.groupBy.columnName}', column not exists`);
-
-    const keyColumn = dataFrameUtil.createColumnFromType(groupColumn.name, groupColumn.type);
-
-    for (const colName in options.groupBy.reduce) {
-      const reducer = options.groupBy.reduce[colName];
-
-      if (booleansUtil.isBoolToBoolReducer(reducer))
-        renderedColumns.push(new BooleansColumn(colName, []));
-      else if (booleansUtil.isBoolToNumberReducer(reducer) || numbersUtil.isNumberReducer(reducer) || stringsUtil.isStrToNumReducer(reducer) || datesUtil.isDateToNumReducer(reducer))
-        renderedColumns.push(new NumbersColumn(colName, []));
-      else if (datesUtil.isDateToDateReducer(reducer))
-        renderedColumns.push(new DatesColumn(colName, []));
+      this.columns.push(newSeries);
     }
 
-    const keysGroups = groupColumn.groupKeys();
-    let index = 0;
+    return this;
+  }
 
-    for (const [value, ids] of keysGroups) {
-      (keyColumn as NumbersColumn).set(index, value as any);
 
-      for (const columnName in options.groupBy.reduce) {
-        const column = df.column(columnName) as NumbersColumn;
 
-        if (!column)
+  /**
+  * Cast Methods
+  * -----------------------------------------------------------
+  */
+
+  cast(columns: { column: string, caster: string, options?: any[], as?: string }[]) {
+    for (const column of columns) {
+      const series = this.column(column.column);
+
+      if (!series || typeof series[column.caster as 'count'] !== 'function') continue;
+
+      const newSeries = series[column.caster as 'count'](...(column.options || []));
+
+      if (column.as)
+        newSeries.name = column.as;
+      else
+        this.omitColumns([series.name]);
+
+      this.columns.push(newSeries);
+    }
+
+    return this;
+  }
+
+
+
+  /**
+  * Reduce Methods
+  * -----------------------------------------------------------
+  */
+
+  reduce(columns: { column: string, reducer: string, options?: any[] }[], name?: string) {
+    const row: any = {};
+
+    for (const column of columns) {
+      const series = this.column(column.column);
+
+      if (!series || typeof series[column.reducer as "count"] !== "function") continue;
+
+      row[column.column] = series[column.reducer as 'count'](...(column.options || [])).value(0);
+    }
+
+    return new Dataframe(name || this.name, [row]);
+  }
+
+
+
+  /**
+  * GroupBy Methods
+  * -----------------------------------------------------------
+  */
+
+  protected reduceGroup(list: any[], groupers: string[], reducers: [column: string, reducer: string, option?: any][]) {
+    const data: any = {};
+
+    for (const reducer of reducers) {
+      // get column type
+      const column = this.column(reducer[0]);
+
+      if (column) {
+        const series = Dataframe.CreateSeriesFromType(reducer[0], column.type, list.map(row => row[reducer[0]]));
+
+        if (typeof series[reducer[1] as 'count'] !== 'function')
           continue;
 
-        const renderedColumn = renderedColumns.find(col => col.name = columnName) as any;
-
-        renderedColumn.set(column.getMany(ids)[options.groupBy.reduce[columnName] as NumbersReducer]());
+        data[reducer[0]] = series[reducer[1] as 'count'](reducer[2]).value(0);
       }
     }
 
-    return new DataFrame(df.name, [keyColumn, ...renderedColumns]);
+    for (const grouper of groupers)
+      data[grouper] = list[0][grouper];
+
+    return data;
   }
 
-  private static reduce(df: DataFrame, options: DataFrameReduce) {
+  groupBy(columns: string[], reducers: [column: string, reducer: string, option?: any][]) {
+    const grouped = groupBy(this.values(), columns);
+    const dfs: Dataframe[] = [];
 
-    for (const reducer of options.reduce) {
-      const column = df.column(reducer.column);
+    for (const data of this.reduceGroup(grouped, columns, reducers))
+      dfs.push(new Dataframe(this.name, [data]));
 
-      if (!column)
+    return dfs.slice(1).reduce((out, curr) => out.concat(curr), dfs[0]);
+  }
+
+
+
+  /**
+  * Concat Methods
+  * -----------------------------------------------------------
+  */
+
+  concat(df: string | Dataframe, map?: { [key: string]: string }, name?: string) {
+    const df2 = typeof df === 'string' ? Dataframe.Get(df) : df;
+    const newDf = this.clone(name);
+
+    if (df2)
+      return newDf;
+
+    for (const row of df2.values()) {
+      let mapped: any;
+
+      if (map) {
+        mapped = {};
+
+        for (const key of row)
+          mapped[map[key]] = row[key];
+      }
+
+      newDf.addRow(mapped || row);
+    }
+
+    return newDf;
+  }
+
+
+
+  /**
+  * Merge Methods
+  * -----------------------------------------------------------
+  */
+
+  merge(df: string | Dataframe, on: [string, string], type: MergeType = 'inner', name?: string) {
+    const df2 = typeof df === 'string' ? Dataframe.Get(df) : df;
+
+    if (df2)
+      return new Dataframe(name || this.name, []);
+
+    const df1Col: any = this.column(on[0]);
+    const df2Col: any = df2.column(on[1]);
+    const rows: any[] = [];
+
+    if (!df1Col || !df2Col || df1Col.type !== df2Col.type)
+      return this;
+
+    const keys = type === 'left'
+      ? df1Col.values()
+      : type === 'right'
+        ? df2Col.values()
+        : type === 'inner'
+          ? (new DFSet(Array.from(df1Col.values() as IterableIterator<string>))).and(new DFSet(Array.from(df2Col.values() as IterableIterator<string>)))
+          : (new DFSet(Array.from(df1Col.values() as IterableIterator<string>))).or(new DFSet(Array.from(df2Col.values() as IterableIterator<string>)));
+
+    for (const key of keys) {
+      const row1: any = this.get(df1Col.eq(key)) ?? {};
+      const row2: any = df2.get(df2Col.eq(key)) ?? {};
+      const merged: any = {};
+
+      for (const colName in this.columnsNames())
+        merged[colName] = row1[colName] ?? null;
+
+      for (const colName in df2.columnsNames())
+        if (colName !== on[1])
+          merged[`${df2.name}_${colName}`] = row2[colName] ?? null;
+
+      rows.push(merged);
+    }
+
+    return new Dataframe(name || this.name, rows, { index: on[0] });
+  }
+
+
+
+  /**
+  * Merge Columns Methods
+  * -----------------------------------------------------------
+  */
+
+  mergeColumns(columns: string[], reducer: string, as: string, replace = true) {
+    const series = this.columns.filter(column => columns.includes(column.name));
+    const type = Dataframe.GetColumnsType(series);
+    let newColumn: Series;
+
+    switch (type) {
+      case 'mix':
+        break;
+
+      case 'boolean':
+        if (booleanUtil.isBooleanReducer(reducer)) newColumn = BooleanSeries.MergeReduce(as, series as BooleanSeries[], reducer, 'left');
+        break;
+
+      case 'date':
+        if (dateUtil.isDateReducer(reducer)) newColumn = DateSeries.MergeReduce(as, series as DateSeries[], reducer, 'left');
+        break;
+
+      case 'datetime':
+        if (datetimeUtil.isDatetimeReducer(reducer)) newColumn = DatetimeSeries.MergeReduce(as, series as DatetimeSeries[], reducer, 'left');
+        break;
+
+      case 'number':
+        if (numberUtil.isNumberReducer(reducer)) newColumn = NumberSeries.MergeReduce(as, series as NumberSeries[], reducer, 'left');
+        break;
+
+      case 'string':
+        if (stringUtil.isStringReducer(reducer)) newColumn = StringSeries.MergeReduce(as, series as StringSeries[], reducer, 'left');
+        break;
+
+      case 'time':
+        if (timeUtil.isTimeReducer(reducer)) newColumn = TimeSeries.MergeReduce(as, series as TimeSeries[], reducer, 'left');
+        break;
+    }
+
+    if (newColumn) {
+      replace && this.omitColumns(columns);
+      this.columns.push(newColumn);
+    }
+
+    return this;
+  }
+
+  mergeColumnsCount(columns: string[], reducer: CountReducer, as: string, replace = true) {
+    const serieses = this.columns.filter(column => columns.includes(column.name));
+    const column = NumberSeries.MergeCountReduce(as, serieses, reducer, 'left');
+
+    replace && this.omitColumns(columns);
+    this.columns.push(column);
+
+    return this;
+  }
+
+  mergeColumnsMath(columns: string[], expr: string, as: string, replace = true) {
+    const serieses = this.columns.filter(column => columns.includes(column.name));
+
+    if (Dataframe.GetColumnsType(serieses) !== 'number')
+      return this;
+
+    const column = NumberSeries.MergeMath(as, serieses as NumberSeries[], expr, 'left');
+
+    replace && this.omitColumns(columns);
+    this.columns.push(column);
+
+    return this;
+  }
+
+  mergeColumnsStringLength(columns: string[], reducer: StringLengthReducer, as: string, replace = true) {
+    const serieses = this.columns.filter(column => columns.includes(column.name));
+
+    if (Dataframe.GetColumnsType(serieses) !== 'string')
+      return this;
+
+    const column = StringSeries.MergeLengthReduce(as, serieses as StringSeries[], reducer, 'left');
+
+    replace && this.omitColumns(columns);
+    this.columns.push(column);
+
+    return this;
+  }
+
+  mergeColumnsDelta(columns: string[], reducer: string, as: string, replace = true) {
+    const serieses = this.columns.filter(column => columns.includes(column.name));
+    const type = Dataframe.GetColumnsType(serieses);
+
+    let column: Series;
+
+    switch (type) {
+      case 'date':
+        if (dateUtil.isDateDeltaReducer(reducer))
+          column = DateSeries.MergeDelta(as, serieses as DateSeries[], reducer, 'left');
+        break;
+
+      case 'datetime':
+        if (datetimeUtil.isDatetimeDeltaReducer(reducer))
+          column = DatetimeSeries.MergeDelta(as, serieses as DatetimeSeries[], reducer, 'left');
+        break;
+
+      case 'time':
+        if (timeUtil.isTimeDeltaReducer(reducer))
+          column = TimeSeries.MergeDelta(as, serieses as TimeSeries[], reducer, 'left');
+        break;
+    }
+
+    if (column) {
+      replace && this.omitColumns(columns);
+      this.columns.push(column);
+    }
+
+    return this;
+  }
+
+  mergeColumnsStrConcat(columns: string[], separator: string, as: string, replace = true) {
+    const serieses = this.columns.filter(column => columns.includes(column.name));
+
+    if (Dataframe.GetColumnsType(serieses) !== 'string')
+      return this;
+
+    const column = StringSeries.MergeConcat(as, serieses as StringSeries[], separator, 'left');
+
+    replace && this.omitColumns(columns);
+    this.columns.push(column);
+
+    return this;
+  }
+
+  protected mergeColumnsStrTemplate(columns: string[], template: string, as: string, replace = true) {
+    const serieses = this.columns.filter(column => columns.includes(column.name));
+
+    if (Dataframe.GetColumnsType(serieses) !== 'string')
+      return this;
+
+    const column = StringSeries.MergeTemplate(as, serieses as StringSeries[], template, 'left');
+
+    replace && this.omitColumns(columns);
+    this.columns.push(column);
+
+    return this;
+  }
+
+
+
+  /**
+  * Agg Methods
+  * -----------------------------------------------------------
+  */
+
+  protected singlePipeAgg(df: Dataframe, pipe: AggregationPipe) {
+
+    for (const method in pipe) {
+      if (typeof df[method as 'select'] !== 'function')
         continue;
 
-      if (
-        (column.type === 'boolean' && !booleansUtil.isBoolReducer(reducer.reducer)) ||
-        (column.type === 'date' && !datesUtil.isDateReducer(reducer.reducer)) ||
-        (column.type === 'number' && !numbersUtil.isNumberReducer(reducer.reducer)) ||
-        (column.type === 'string' && !stringsUtil.isStrToNumReducer(reducer.reducer) && !stringsUtil.isStrReducer(reducer.reducer))
-      ) {
-        throw new DataFrameError(`${column.type}s column does not have reducer: '${reducer.reducer}'`);
-      }
-
-      if (!reducer.as)
-        df.deleteColumns([column.name]);
-
-      df.addColumn((column as NumbersColumn)[reducer.reducer as NumbersReducer](reducer.as || column.name));
+      df = df[method as 'select'](...pipe[method as 'select']);
     }
 
     return df;
   }
 
-  private static transform(df: DataFrame, options: DataFrameTransform) {
-    for (const transformer of options.transform) {
+  agg(pipeline: AggregationPipe[]): Dataframe
+  agg(name: string, pipeline: AggregationPipe[]): Dataframe
+  agg(name: string | AggregationPipe[], pipeline?: AggregationPipe[]): Dataframe {
+    let df = this.clone(typeof name === 'string' ? name : this.name);
 
-      const column = df.column(transformer.column);
+    pipeline = pipeline ?? (name as AggregationPipe[]);
 
-      if (!column)
-        continue;
-
-      if (column.type === 'boolean')
-        throw new DataFrameError(`${column.name} does not have any tranformers`);
-
-      const operator = transformer.operator[0];
-
-      if (
-        column.type === 'number' && !numbersUtil.isNumberTransformer(operator) ||
-        column.type === 'string' && !stringsUtil.isStringTransformer(operator) ||
-        column.type === 'date' && !datesUtil.isDateTransformer(operator)
-      )
-        throw new DataFrameError(`${column.type}s column '${column.name}' does not have transformer: '${operator}'`);
-
-      if (!transformer.as)
-        df.deleteColumns([column.name]);
-
-      df.addColumn((column as any)[operator](transformer.as || column.name, ...transformer.operator.slice(1)))
-    }
-
-    return df;
-  }
-
-  private static cast(df: DataFrame, options: DataFrameCast) {
-    for (const caster of options.cast) {
-      const column = df.column(caster.column);
-
-      if (!column)
-        continue;
-
-      const operator = caster.operator[0];
-
-      if (
-        (column.type === 'boolean' && !booleansUtil.isBoolCaster(operator)) ||
-        (column.type === 'date' && !datesUtil.isDateCaster(operator)) ||
-        (column.type === 'number' && !numbersUtil.isNumberCaster(operator)) ||
-        (column.type === 'string' && !stringsUtil.isStringCaster(operator))
-      )
-        throw new DataFrameError(`${column.type}s column '${column.name}' can not be casted: '${operator}'`);
-
-
-      if (!caster.as)
-        df.deleteColumns([column.name]);
-
-      df.addColumn((column as any)[operator](caster.as || column.name, ...caster.operator.slice(1)));
-    }
-
-    return df;
-  }
-
-  private static merge(df: DataFrame, options: DataFrameMerge) {
-    for (const merger of options.merge) {
-      const columns = merger.columns.map(name => df.column(name)).filter(Boolean);
-      let newColumn: BooleansColumn | DatesColumn | NumbersColumn | StringsColumn;
-
-      if (columns.length === 0 || columns.length !== merger.columns.length)
-        throw new DataFrameError('invalid columns names provided to merge pipe');
-
-      const type = dataFrameUtil.columnsType(columns);
-      const operator = merger.operator[0];
-
-      if (type === 'mix' && (operator !== "concat" && operator !== "template"))
-        throw new DataFrameError(`merge '${operator}' pipe only accepts unified columns types`);
-
-      if (operator === 'merge') {
-        const reducer = merger.operator[1];
-
-        if (
-          (type === 'boolean' && !booleansUtil.isBoolReducer(reducer)) ||
-          (type === 'date' && !datesUtil.isDateToDateReducer(reducer)) ||
-          (type === 'number' && !numbersUtil.isNumberReducer(reducer)) ||
-          (type === 'string' && !stringsUtil.isStrToNumReducer(reducer)  && !stringsUtil.isStrReducer(reducer))
-        )
-          throw new DataFrameError('merge reducer does not match columns type');
-
-        if (type === 'boolean')
-          newColumn = BooleansColumn.Merge(merger.as, columns as BooleansColumn[], reducer as BoolReducer);
-        else if (type === 'date')
-          newColumn = DatesColumn.Merge(merger.as, columns as DatesColumn[], reducer as DateToDateReducer);
-        else if (type === 'number')
-          newColumn = NumbersColumn.Merge(merger.as, columns as NumbersColumn[], reducer as NumbersReducer);
-        else
-          newColumn = StringsColumn.Merge(merger.as, columns as StringsColumn[], reducer as StrToNumReducer);
-
-      } else if (operator === 'concat' || operator === "template") {
-        if (type !== 'string')
-          throw new DataFrameError('merge concat only accepts strings columns');
-
-        newColumn = StringsColumn.Concat(merger.as, columns as StringsColumn[], merger.operator[1]);
-
-      } else if (operator === 'calculate') {
-        if (type !== 'number')
-          throw new DataFrameError('merge calculate only accepts numbers columns');
-
-        newColumn = NumbersColumn.CalculateMerge(merger.as, columns as NumbersColumn[], merger.operator[1]);
-
-      } else {
-        if (type !== 'date')
-          throw new DataFrameError('merge delta only accepts dates columns');
-
-        newColumn = DatesColumn.MergeDelta(merger.as, columns as DatesColumn[], merger.operator[1]);
-      }
-
-      df.addColumn(newColumn);
-    }
-
-    return df;
-  }
-
-  private static processSinglePipe(df: DataFrame, pipe: DataFrameAggregationPipe) {
-
-    if (aggregationUtil.isFilterPipe(pipe[0]))
-      return DataFrame.filter(df, pipe[0]);
-
-    if (aggregationUtil.isSelectPipe(pipe[0]))
-      return DataFrame.select(df, pipe[0]);
-
-    if (aggregationUtil.isOmitPipe(pipe[0]))
-      return DataFrame.omit(df, pipe[0]);
-
-    if (aggregationUtil.isSortPipe(pipe[0]))
-      return DataFrame.sort(df, pipe[0]);
-
-    if (aggregationUtil.isCleanPipe(pipe[0]))
-      return DataFrame.clean(df, pipe[0]);
-
-    if (aggregationUtil.isGroupByPipe(pipe[0]))
-      return DataFrame.groupBy(df, pipe[0]);
-
-    if (aggregationUtil.isReducePipe(pipe[0]))
-      return DataFrame.reduce(df, pipe[0]);
-
-    if (aggregationUtil.isTransformPipe(pipe[0]))
-      return DataFrame.transform(df, pipe[0]);
-
-    if (aggregationUtil.isCastPipe(pipe[0]))
-      return DataFrame.cast(df, pipe[0]);
-
-    if (aggregationUtil.isMergePipe(pipe[0]))
-      return DataFrame.merge(df, pipe[0]);
+    for (const pipe of pipeline)
+      df = this.singlePipeAgg(df, pipe);
 
     return df;
   }
 
 
 
+  /**
+   * Static Methods
+   * -----------------------------------------------------------
+   */
 
-  // Join Methods
-  // =======================================================================================================================================
-  static InnerJoin(name: string, list: { df: DataFrame, by: string }[]) {
-    if (list.length === 0)
-      return new DataFrame(name, []);
+  private static DFs = new Map<string, Dataframe>();
 
-    if (list.length === 1)
-      return list[0].df;
-
-    for (const entry of list)
-      if (!entry.df.hasColumn(entry.by))
-        throw new DataFrameError(`dataframe '${entry.df.name}' has no column named '${entry.by}'`);
-
-    const result: any = [];
-
-    for (const record of list[0].df) {
-      let breaked = false;
-
-      for (let i = 1; i < list.length; i++) {
-        const df = list[i].df;
-        const key = df.hasColumnValue(list[i].by, record[list[0].by]);
-
-        if (key === null) {
-          breaked = true;
-          break;
-        }
-
-        Object.assign(record, omit(df.record(key, true), [`${df.name}_${list[i].by}`]));
-      }
-
-      if (breaked)
-        continue;
-
-      result.push(record);
-    }
-
-    return DataFrame.FromJson(name, result, list[0].by);
+  static Names() {
+    return Array.from(Dataframe.DFs.keys())
   }
 
-  static OuterJoin(name: string, list: { df: DataFrame, by: string }[]) {
-    if (list.length === 0)
-      return new DataFrame(name, []);
-
-    if (list.length === 1)
-      return list[0].df;
-
-    for (const entry of list)
-      if (!entry.df.hasColumn(entry.by))
-        throw new DataFrameError(`dataframe '${entry.df.name}' has no column named '${entry.by}'`);
-
-    const result: any = [];
-
-    for (const record of list[0].df) {
-
-      for (let i = 1; i < list.length; i++) {
-        const df = list[i].df;
-        const key = df.hasColumnValue(list[i].by, record[list[0].by]);
-
-        Object.assign(record, key === null
-          ? omit(df.nullRecord(true), [`${df.name}_${list[i].by}`])
-          : omit(df.record(key, true), [`${df.name}_${list[i].by}`])
-        );
-      }
-
-      result.push(record);
-    }
-
-    return DataFrame.FromJson(name, result, list[0].by);
+  static Exists(name: string) {
+    return Dataframe.DFs.has(name);
   }
 
-  static Concat(name: string, dfs: DataFrame[], columns: (string | string[])[]) {
-    const data: any[] = [];
-
-    for (let i = 0; i < dfs.length; i++) {
-      const df = dfs[i];
-      const cols = columns.map(col => typeof col === "string" ? col : col[i]);
-
-      for (const record of df)
-        data.push(pick(record, cols));
-    }
-
-    return DataFrame.FromJson(name, data);
+  static Get(name: string) {
+    return Dataframe.DFs.get(name);
   }
 
-
-
-  // Create Methods
-  // =======================================================================================================================================
-  static Create(
-    name: string,
-    definitions: (BooleansColumnDefinition | DatesColumnDefinition | NumbersColumnDefinition | StringsColumnDefinition)[],
-    data?: { [key: string]: any }[]
-  ) {
-    const columns: DataFrameColumn[] = [];
-    const keyColumn = definitions.find(col => col.isKey);
-
-    for (const def of definitions) {
-      if (def.type === 'boolean')
-        columns.push(new BooleansColumn(def.name, [], def.validate));
-      else if (def.type === 'date')
-        columns.push(new DatesColumn(def.name, [], def.validate));
-      else if (def.type === 'number')
-        columns.push(new NumbersColumn(def.name, [], def.validate));
-      else if (def.type === 'string')
-        columns.push(new StringsColumn(def.name, [], def.validate));
-    }
-
-    if (data?.length > 0) {
-      for (let i = 0; i < data.length; i++) {
-        const record = data[i];
-        const key = !keyColumn
-          ? i
-          : keyColumn.type === 'date'
-            ? +record[keyColumn.name]
-            : record[keyColumn.name];
-
-        for (const colName of Object.keys(record)) {
-          const column = columns.find(col => col.name === colName);
-
-          if (!column)
-            continue;
-
-          (column as NumbersColumn).set(key, record[colName]);
-        }
-      }
-    }
-
-    return new DataFrame(name, columns, keyColumn?.name);
+  static IsSeries(series: any): series is Series {
+    return columnTypesList.includes(series?.type);
   }
 
-  static FromJson(name: string, data: { [key: string]: any }[], keyColumn?: string) {
-    if (data.length === 0)
-      return new DataFrame(name, []);
+  static CreateSeriesFromType(name: string, type: Column, data: any[]) {
 
-    const columns: { [colName: string]: DataFrameColumn } = {};
-    const columnsNames = new Set(Object.keys(data[0]));
-    const nullColumns: string[] = [];
+    switch (type) {
+      case 'boolean':
+        return new BooleanSeries(name, data);
+      case 'date':
+        return new DateSeries(name, data);
+      case 'datetime':
+        return new DatetimeSeries(name, data);
+      case 'number':
+        return new NumberSeries(name, data);
+      case 'string':
+        return new StringSeries(name, data);
+      case 'time':
+        return new TimeSeries(name, data);
+      default:
+        return null;
+    }
+  }
 
-    for (const colName of columnsNames) {
-      const column = dataFrameUtil.createColumnFromData(colName, data.map(col => col[colName]));
+  static GetTypeOfData(data: any[], loops = 10): Column {
+    const types: [boolean: number, date: number, number: number, string: number] = [0, 0, 0, 0];
 
-      if (column)
-        columns[colName] = column;
-      else
-        nullColumns.push(colName)
+    for (let i = 0; i < loops; i++) {
+      if (typeof data[i] === "boolean")
+        types[0]++;
+      else if (typeof data[i] === "number")
+        types[2]++;
+      else if (typeof data[i] === "string")
+        types[3]++;
+      else if (data[i] instanceof Date)
+        types[1]++;
     }
 
-    for (const nullCol of nullColumns)
-      columnsNames.delete(nullCol);
+    const maxIndex = types.reduce((maxIndex, curr, i) => curr > types[maxIndex] ?? 0 ? i : maxIndex, 0);
 
-    for (let i = 0; i < data.length; i++) {
-      const record = data[i];
-      const key = !!keyColumn && record[keyColumn] ? record[keyColumn] : i;
-
-      for (const colName of columnsNames)
-        (columns[colName] as NumbersColumn).set(key, record[colName]);
+    switch (maxIndex) {
+      case 0:
+        return 'boolean';
+      case 1:
+        return 'datetime';
+      case 2:
+        return 'number';
+      case 3:
+        return 'string';
     }
+  }
 
-    return new DataFrame(name, Object.keys(columns).map(name => columns[name]), keyColumn);
+  static GetColumnsType(columns: Series[]): Column | 'mix' {
+    if (columns.some((c, i, arr) => i > 0 && c.type !== arr[i - 1].type))
+      return 'mix';
+
+    return columns[0].type as Column;
   }
 }

@@ -43,6 +43,10 @@ export class Range {
      : value < this.start && value > this.end;
   }
 
+  toArray() {
+    return Array.from(this);
+  }
+
   /** 
    * Returns the percentage of the given value between the start and end values.
    * 

@@ -11,7 +11,7 @@ import { NumberConstraintError } from "./errors";
  * ------------------------------------------------------------
  */
 
-export type NumberReducer = 'count' | 'min' | 'max' | 'mid' | 'qnt' | 'sum' | 'mean' | 'variance' | 'std' | 'mode' | 'rear';
+export type NumberReducer = 'count' | 'min' | 'max' | 'mid' | 'qnt' | 'skw' | 'sum' | 'mean' | 'variance' | 'std' | 'mode' | 'rear';
 
 
 
@@ -64,7 +64,7 @@ export interface NumberMatch {
 
 export const numberUtil = {
   isNumberReducer(reducer: any): reducer is NumberReducer {
-    return ['count', 'min', 'max', 'mid', 'qnt', 'sum', 'mean', 'variance', 'std', 'mode', 'rear'].includes(reducer);
+    return ['count', 'min', 'max', 'mid', 'qnt', 'skw', 'sum', 'mean', 'variance', 'std', 'mode', 'rear'].includes(reducer);
   },
 
   isNumberTransformer(transformer: any): transformer is NumberTronsformer {
@@ -120,14 +120,25 @@ export const numberUtil = {
     return (this.min(values) + this.max(values)) / 2;
   },
 
-  qnt(values: IterableIterator<number>, position = 0.5) {
-    const list = Array.from(values).filter(Boolean).sort((a, b) => a - b);
-    const length = list.length;
-    const index = length * position;
+  qnt(values: IterableIterator<number>, pos = 0.5) {
+    const count = this.count(values);
 
-    return ("" + index).includes(".")
-      ? list[Math.ceil(index)]
-      : this.mid([list[index], list[index + 1]].values());
+    if (pos > 1 || pos < 0 || count === 0)
+      return 0;
+
+    const sorted = Array.from(values).sort((a, b) => a - b);
+    const index = count * pos;
+    const floor = Math.floor(index);
+
+    return floor !== index ? sorted[floor] + sorted[floor + 1] / 2 : sorted[floor];
+  },
+
+  skw(values: IterableIterator<number>) {
+    const mean = this.mean(values);
+    const median = this.qnt(values);
+    const std = this.std(values);
+
+    return (3 * (mean - median)) / std;
   },
 
   sum(values: IterableIterator<number>) {
@@ -168,19 +179,6 @@ export const numberUtil = {
 
   std(values: IterableIterator<number>) {
     return Math.sqrt(this.variance(values));
-  },
-
-  quantile(values: IterableIterator<number>, pos: number) {
-    const count = this.count(values);
-
-    if (pos > 1 || pos < 0 || count === 0)
-      return 0;
-
-    const sorted = Array.from(values).sort((a, b) => a - b);
-    const index = count * pos;
-    const floor = Math.floor(index);
-
-    return floor !== index ? sorted[floor] + sorted[floor + 1] / 2 : sorted[floor];
   },
 
   mode(values: IterableIterator<number>) {

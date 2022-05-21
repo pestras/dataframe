@@ -154,10 +154,6 @@ export class NumberSeries extends Series<number, NumberConstraints> {
     return new NumberSeries(name || this.name, [numberUtil.mid(this.values())]);
   }
 
-  qnt(pos?: number, name?: string) {
-    return new NumberSeries(name || this.name, [numberUtil.qnt(this.values(), pos)]);
-  }
-
   sum(name?: string) {
     return new NumberSeries(name || this.name, [numberUtil.sum(this.values())]);
   }
@@ -174,8 +170,12 @@ export class NumberSeries extends Series<number, NumberConstraints> {
     return new NumberSeries(name || this.name, [numberUtil.std(this.values())]);
   }
 
-  qunatile(name?: string, position = 0.5) {
-    return new NumberSeries(name || this.name, [numberUtil.quantile(this.values(), position)]);
+  qnt(name?: string, position = 0.5) {
+    return new NumberSeries(name || this.name, [numberUtil.qnt(this.values(), position)]);
+  }
+
+  skw(name?: string) {
+    return new NumberSeries(name || this.name, [numberUtil.skw(this.values())]);
   }
 
   mode(name?: string) {
